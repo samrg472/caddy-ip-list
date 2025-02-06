@@ -1,4 +1,4 @@
-module github.com/monobilisim/caddy-url-ip
+module github.com/monobilisim/caddy-ip-list
 
 go 1.20
 

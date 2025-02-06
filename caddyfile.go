@@ -1,4 +1,4 @@
-package caddy_url_ip
+package caddy_ip_list
 
 import (
 	"strings"
@@ -38,7 +38,7 @@ type URLIPRange struct {
 // CaddyModule returns the Caddy module information.
 func (URLIPRange) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
-		ID:  "http.ip_sources.url",
+		ID:  "http.ip_sources.list",
 		New: func() caddy.Module { return new(URLIPRange) },
 	}
 }
@@ -154,7 +154,7 @@ func (s *URLIPRange) GetIPRanges(_ *http.Request) []netip.Prefix {
 
 // UnmarshalCaddyfile implements caddyfile.Unmarshaler.
 //
-//	url {
+//	list {
 //	   interval val
 //	   timeout val
 //	   url string

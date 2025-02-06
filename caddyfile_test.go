@@ -1,4 +1,4 @@
-package caddy_url_ip
+package caddy_ip_list
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 
 func TestDefault(t *testing.T) {
 	testDefault(t, `url`)
-	testDefault(t, `url { }`)
+	testDefault(t, `list { }`)
 }
 
 func testDefault(t *testing.T, input string) {
@@ -34,7 +34,8 @@ func testDefault(t *testing.T, input string) {
 
 func TestUnmarshal(t *testing.T) {
 	input := `
-	url {
+	list {
+	    url https://www.cloudflare.com/ips-v4
 		interval 1.5h
 		timeout 30s
 	}`
@@ -61,7 +62,8 @@ func TestUnmarshal(t *testing.T) {
 // Simulates being nested in another block.
 func TestUnmarshalNested(t *testing.T) {
 	input := `{
-				url {
+				list {
+				    url https://www.cloudflare.com/ips-v4
 					interval 1.5h
 					timeout 30s
 				}
