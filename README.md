@@ -8,6 +8,8 @@ Supported from Caddy v2.6.3 onwards.
 
 ### Using `dynamic_client_ip`
 
+You can get `dynamic_client_ip` from [here](https://github.com/tuzzmaniandevil/caddy-dynamic-clientip)
+
 ```caddy
 @denied dynamic_client_ip list {
     url https://www.cloudflare.com/ips-v4  # specify the URL to fetch the IP list
