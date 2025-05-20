@@ -4,6 +4,24 @@ This module retrieves an IP list from specified URLs at a defined interval. It i
 
 Supported from Caddy v2.6.3 onwards.
 
+## Installation
+
+There are two ways to install `caddy-ip-list` with `dynamic_client_ip` support:
+
+### Build with `xcaddy`
+
+```bash
+xcaddy build --with github.com/tuzzmaniandevil/caddy-dynamic-clientip \
+             --with github.com/monobilisim/caddy-ip-list
+```
+
+### Install via `caddy add-package`
+
+```bash
+caddy add-package github.com/tuzzmaniandevil/caddy-dynamic-clientip
+caddy add-package github.com/monobilisim/caddy-ip-list
+```
+
 ## Example Configuration
 
 ### Using `dynamic_client_ip`
