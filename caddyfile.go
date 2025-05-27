@@ -1,19 +1,20 @@
 package caddy_ip_list
 
 import (
-	"strings"
 	"bufio"
 	"context"
+	"fmt"
 	"net/http"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"go.uber.org/zap"
 )
-
 
 func init() {
 	caddy.RegisterModule(URLIPRange{})
@@ -21,8 +22,8 @@ func init() {
 
 // URLIPRange provides a range of IP address prefixes (CIDRs) retrieved from url.
 type URLIPRange struct {
-    // List of URLs to fetch the IP ranges from.
-    URLs []string `json:"url"`
+	// List of URLs to fetch the IP ranges from.
+	URLs []string `json:"url"`
 	// refresh Interval
 	Interval caddy.Duration `json:"interval,omitempty"`
 	// request Timeout
@@ -96,14 +97,14 @@ func (s *URLIPRange) fetch(api string) ([]netip.Prefix, error) {
 
 func (s *URLIPRange) getPrefixes() ([]netip.Prefix, error) {
 	var fullPrefixes []netip.Prefix
-    for _, url := range s.URLs {
-	    // Fetch list
-	    prefixes, err := s.fetch(url)
-	    if err != nil {
-		    return nil, err
-	    }
-	    fullPrefixes = append(fullPrefixes, prefixes...)
-    }
+	for _, url := range s.URLs {
+		// Fetch list
+		prefixes, err := s.fetch(url)
+		if err != nil {
+			return nil, err
+		}
+		fullPrefixes = append(fullPrefixes, prefixes...)
+	}
 
 	return fullPrefixes, nil
 }
@@ -112,6 +113,15 @@ func (s *URLIPRange) Provision(ctx caddy.Context) error {
 	s.ctx = ctx
 	s.lock = new(sync.RWMutex)
 
+	// Perform initial fetch
+	initialPrefixes, err := s.getPrefixes()
+	if err != nil {
+		// Wrap the error for more context when Caddy reports it
+		return fmt.Errorf("failed to perform initial fetch of IP ranges: %w", err)
+	}
+	// Store the successfully fetched ranges. No lock needed here as refreshLoop hasn't started.
+	s.ranges = initialPrefixes
+
 	// update in background
 	go s.refreshLoop()
 	return nil
@@ -119,20 +129,27 @@ func (s *URLIPRange) Provision(ctx caddy.Context) error {
 
 func (s *URLIPRange) refreshLoop() {
 	if s.Interval == 0 {
-		s.Interval = caddy.Duration(time.Hour)
+		s.Interval = caddy.Duration(time.Hour) // Default interval
 	}
 
 	ticker := time.NewTicker(time.Duration(s.Interval))
-	// first time update
-	s.lock.Lock()
-	// it's nil anyway if there is an error
-	s.ranges, _ = s.getPrefixes()
-	s.lock.Unlock()
+	// Initial fetch is now done in Provision, so we remove it from here.
+	// The loop will start, and the first refresh will happen after the first Interval.
+
 	for {
 		select {
 		case <-ticker.C:
 			fullPrefixes, err := s.getPrefixes()
 			if err != nil {
+				// Log the error for background refreshes. Caddy continues with the old list.
+				// Ensure logger is available before attempting to use it.
+				// s.ctx is guaranteed to be non-nil by Provision.
+				if logger := s.ctx.Logger(); logger != nil {
+					logger.Error("failed to refresh IP ranges from URLs",
+						zap.Strings("urls", s.URLs),
+						zap.Error(err))
+				}
+				// Continue to the next tick, keeping the old ranges.
 				break
 			}
 
@@ -187,11 +204,11 @@ func (m *URLIPRange) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return err
 			}
 			m.Timeout = caddy.Duration(val)
-        case "url":
-            if !d.NextArg() {
-                return d.ArgErr()
-            }
-            m.URLs = append(m.URLs, d.Val())
+		case "url":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			m.URLs = append(m.URLs, d.Val())
 		default:
 			return d.ArgErr()
 		}
