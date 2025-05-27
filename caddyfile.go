@@ -130,11 +130,6 @@ func (s *URLIPRange) refreshLoop() {
 	}
 
 	ticker := time.NewTicker(time.Duration(s.Interval))
-	// first time update
-	s.lock.Lock()
-	// it's nil anyway if there is an error
-	s.ranges, _ = s.getPrefixes()
-	s.lock.Unlock()
 	for {
 		select {
 		case <-ticker.C:
