@@ -13,7 +13,6 @@ import (
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
-	"go.uber.org/zap"
 )
 
 func init() {
@@ -114,13 +113,11 @@ func (s *URLIPRange) Provision(ctx caddy.Context) error {
 	s.lock = new(sync.RWMutex)
 
 	// Perform initial fetch
-	initialPrefixes, err := s.getPrefixes()
+	initialRanges, err := s.getPrefixes()
 	if err != nil {
-		// Wrap the error for more context when Caddy reports it
-		return fmt.Errorf("failed to perform initial fetch of IP ranges: %w", err)
+		return fmt.Errorf("failed to fetch initial IP ranges: %w", err)
 	}
-	// Store the successfully fetched ranges. No lock needed here as refreshLoop hasn't started.
-	s.ranges = initialPrefixes
+	s.ranges = initialRanges
 
 	// update in background
 	go s.refreshLoop()
@@ -129,27 +126,20 @@ func (s *URLIPRange) Provision(ctx caddy.Context) error {
 
 func (s *URLIPRange) refreshLoop() {
 	if s.Interval == 0 {
-		s.Interval = caddy.Duration(time.Hour) // Default interval
+		s.Interval = caddy.Duration(time.Hour)
 	}
 
 	ticker := time.NewTicker(time.Duration(s.Interval))
-	// Initial fetch is now done in Provision, so we remove it from here.
-	// The loop will start, and the first refresh will happen after the first Interval.
-
+	// first time update
+	s.lock.Lock()
+	// it's nil anyway if there is an error
+	s.ranges, _ = s.getPrefixes()
+	s.lock.Unlock()
 	for {
 		select {
 		case <-ticker.C:
 			fullPrefixes, err := s.getPrefixes()
 			if err != nil {
-				// Log the error for background refreshes. Caddy continues with the old list.
-				// Ensure logger is available before attempting to use it.
-				// s.ctx is guaranteed to be non-nil by Provision.
-				if logger := s.ctx.Logger(); logger != nil {
-					logger.Error("failed to refresh IP ranges from URLs",
-						zap.Strings("urls", s.URLs),
-						zap.Error(err))
-				}
-				// Continue to the next tick, keeping the old ranges.
 				break
 			}
 
