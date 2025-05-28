@@ -27,6 +27,8 @@ type URLIPRange struct {
 	Interval caddy.Duration `json:"interval,omitempty"`
 	// request Timeout
 	Timeout caddy.Duration `json:"timeout,omitempty"`
+	// Number of retries for fetching the IP list. Default is 0 (no retries).
+	Retries int `json:"retries,omitempty"`
 
 	// Holds the parsed CIDR ranges from Ranges.
 	ranges []netip.Prefix
@@ -52,46 +54,63 @@ func (s *URLIPRange) getContext() (context.Context, context.CancelFunc) {
 }
 
 func (s *URLIPRange) fetch(api string) ([]netip.Prefix, error) {
-	ctx, cancel := s.getContext()
-	defer cancel()
+	var lastErr error
+	for attempt := 0; attempt <= s.Retries; attempt++ {
+		ctx, cancel := s.getContext()
+		defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, api, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	scanner := bufio.NewScanner(resp.Body)
-	var prefixes []netip.Prefix
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		// Remove comments from the line
-		if idx := strings.Index(line, "#"); idx != -1 {
-			line = line[:idx]
-		}
-
-		// Trim spaces
-		line = strings.TrimSpace(line)
-
-		// Skip empty lines
-		if line == "" {
-			continue
-		}
-
-		// Convert to prefix
-		prefix, err := caddyhttp.CIDRExpressionToPrefix(line)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, api, nil)
 		if err != nil {
-			return nil, err
+			lastErr = err
+			break
 		}
-		prefixes = append(prefixes, prefix)
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			lastErr = err
+		} else {
+			if resp.StatusCode < 200 || resp.StatusCode > 299 {
+				resp.Body.Close()
+				lastErr = fmt.Errorf("fetch %s returned HTTP %d", api, resp.StatusCode)
+			} else {
+				scanner := bufio.NewScanner(resp.Body)
+				var prefixes []netip.Prefix
+				for scanner.Scan() {
+					line := scanner.Text()
+
+					// Remove comments from the line
+					if idx := strings.Index(line, "#"); idx != -1 {
+						line = line[:idx]
+					}
+
+					// Trim spaces
+					line = strings.TrimSpace(line)
+
+					// Skip empty lines
+					if line == "" {
+						continue
+					}
+
+					// Convert to prefix
+					prefix, err := caddyhttp.CIDRExpressionToPrefix(line)
+					if err != nil {
+						resp.Body.Close()
+						return nil, err
+					}
+					prefixes = append(prefixes, prefix)
+				}
+				resp.Body.Close()
+				return prefixes, nil // Success
+			}
+		}
+
+		// If not last attempt, delay before retrying
+		if attempt < s.Retries {
+			time.Sleep(1 * time.Second)
+		}
 	}
-	return prefixes, nil
+	// After all attempts
+	return nil, fmt.Errorf("after %d retries: %w", s.Retries, lastErr)
 }
 
 func (s *URLIPRange) getPrefixes() ([]netip.Prefix, error) {
@@ -189,6 +208,16 @@ func (m *URLIPRange) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return err
 			}
 			m.Timeout = caddy.Duration(val)
+		case "retries":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			var n int
+			_, err := fmt.Sscanf(d.Val(), "%d", &n)
+			if err != nil || n < 0 {
+				return fmt.Errorf("invalid retries value: %s", d.Val())
+			}
+			m.Retries = n
 		case "url":
 			if !d.NextArg() {
 				return d.ArgErr()
