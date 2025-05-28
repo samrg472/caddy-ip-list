@@ -34,6 +34,7 @@ You can get `dynamic_client_ip` from [here](https://github.com/tuzzmaniandevil/c
     url https://www.cloudflare.com/ips-v6  # You can use multiple URLs
     interval 12h
     timeout 15s
+    retries 2
 }
 abort @denied
 ```
@@ -46,6 +47,7 @@ trusted_proxies list {
     url https://www.cloudflare.com/ips-v6  # You can use multiple URLs
     interval 12h
     timeout 15s
+    retries 2
 }
 ```
 
@@ -56,3 +58,12 @@ trusted_proxies list {
 | url      | URL(s) to retrieve the IP list                   | string   | *required* |
 | interval | Frequency at which the IP list is retrieved      | duration | 1h         |
 | timeout  | Maximum time to wait for a response from the URL | duration | no timeout |
+| retries  | Maximum number of retries per URL on startup     | int      | 0          |
+
+## URL Fetching and Startup Behavior
+
+- On startup, the module will attempt to fetch each configured URL.
+- If any URL fails to respond successfully (network error or non-2xx status), Caddy will retry up to the configured `retries` count (with 1s pause between attempts).
+- If, after all retries, any URL still fails, Caddy will fail to start, and an error will be logged.
+- If all URLs are reachable, the IP list is loaded and used as normal.
+- The refresh loop will continue to update the list in the background at the configured `interval`
