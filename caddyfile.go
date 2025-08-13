@@ -3,9 +3,14 @@ package caddy_ip_list
 import (
 	"bufio"
 	"context"
+    "crypto/sha256"
+    "encoding/hex"
+    "encoding/json"
 	"fmt"
 	"net/http"
 	"net/netip"
+    "os"
+    "path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +18,7 @@ import (
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+    "go.uber.org/zap"
 )
 
 func init() {
@@ -30,11 +36,16 @@ type URLIPRange struct {
 	// Number of retries for fetching the IP list. Default is 0 (no retries).
 	Retries int `json:"retries,omitempty"`
 
+    // Optional path to a cache file. If not set, a file under Caddy's data
+    // directory will be used, derived from the URLs.
+    CacheFile string `json:"cache_file,omitempty"`
+
 	// Holds the parsed CIDR ranges from Ranges.
 	ranges []netip.Prefix
 
 	ctx  caddy.Context
 	lock *sync.RWMutex
+    log  *zap.Logger
 }
 
 // CaddyModule returns the Caddy module information.
@@ -57,15 +68,17 @@ func (s *URLIPRange) fetch(api string) ([]netip.Prefix, error) {
 	var lastErr error
 	for attempt := 0; attempt <= s.Retries; attempt++ {
 		ctx, cancel := s.getContext()
-		defer cancel()
+        // ensure we cancel each attempt's context
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, api, nil)
 		if err != nil {
 			lastErr = err
-			break
+            cancel()
+            break
 		}
 
 		resp, err := http.DefaultClient.Do(req)
+        cancel()
 		if err != nil {
 			lastErr = err
 		} else {
@@ -113,6 +126,87 @@ func (s *URLIPRange) fetch(api string) ([]netip.Prefix, error) {
 	return nil, fmt.Errorf("after %d retries: %w", s.Retries, lastErr)
 }
 
+type cacheFileContents struct {
+    Prefixes  []string  `json:"prefixes"`
+    UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (s *URLIPRange) cachePath() (string, error) {
+    if s.CacheFile != "" {
+        return s.CacheFile, nil
+    }
+    // derive from URLs
+    joined := strings.Join(s.URLs, "|")
+    sum := sha256.Sum256([]byte(joined))
+    name := "ip-list-cache-" + hex.EncodeToString(sum[:]) + ".json"
+    dir := caddy.AppDataDir()
+    if dir == "" {
+        // fallback to current working directory
+        dir = "."
+    }
+    return filepath.Join(dir, name), nil
+}
+
+func (s *URLIPRange) loadFromCache() ([]netip.Prefix, error) {
+    path, err := s.cachePath()
+    if err != nil {
+        return nil, err
+    }
+    f, err := os.Open(path)
+    if err != nil {
+        return nil, err
+    }
+    defer f.Close()
+    var contents cacheFileContents
+    if err := json.NewDecoder(f).Decode(&contents); err != nil {
+        return nil, err
+    }
+    prefixes := make([]netip.Prefix, 0, len(contents.Prefixes))
+    for _, p := range contents.Prefixes {
+        prefix, err := caddyhttp.CIDRExpressionToPrefix(p)
+        if err != nil {
+            return nil, fmt.Errorf("invalid prefix in cache %q: %w", p, err)
+        }
+        prefixes = append(prefixes, prefix)
+    }
+    return prefixes, nil
+}
+
+func (s *URLIPRange) saveToCache(prefixes []netip.Prefix) error {
+    path, err := s.cachePath()
+    if err != nil {
+        return err
+    }
+    // ensure directory exists
+    if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+        return err
+    }
+    // prepare contents
+    contents := cacheFileContents{UpdatedAt: time.Now()}
+    contents.Prefixes = make([]string, 0, len(prefixes))
+    for _, p := range prefixes {
+        contents.Prefixes = append(contents.Prefixes, p.String())
+    }
+    // write atomically
+    tmp := path + ".tmp"
+    f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+    if err != nil {
+        return err
+    }
+    enc := json.NewEncoder(f)
+    enc.SetIndent("", "  ")
+    if err := enc.Encode(&contents); err != nil {
+        f.Close()
+        _ = os.Remove(tmp)
+        return err
+    }
+    if err := f.Close(); err != nil {
+        _ = os.Remove(tmp)
+        return err
+    }
+    return os.Rename(tmp, path)
+}
+
 func (s *URLIPRange) getPrefixes() ([]netip.Prefix, error) {
 	var fullPrefixes []netip.Prefix
 	for _, url := range s.URLs {
@@ -130,13 +224,26 @@ func (s *URLIPRange) getPrefixes() ([]netip.Prefix, error) {
 func (s *URLIPRange) Provision(ctx caddy.Context) error {
 	s.ctx = ctx
 	s.lock = new(sync.RWMutex)
+    s.log = ctx.Logger()
 
 	// Perform initial fetch
-	initialRanges, err := s.getPrefixes()
-	if err != nil {
-		return fmt.Errorf("failed to fetch initial IP ranges: %w", err)
-	}
-	s.ranges = initialRanges
+    initialRanges, err := s.getPrefixes()
+    if err != nil {
+        // Attempt to load from cache so we can start even when sources are down
+        cached, cacheErr := s.loadFromCache()
+        if cacheErr != nil {
+            return fmt.Errorf("failed to fetch initial IP ranges and no cache available: fetch error: %v, cache error: %v", err, cacheErr)
+        }
+        s.ranges = cached
+        if s.log != nil {
+            s.log.Warn("using cached IP ranges due to fetch failure on startup", zap.Error(err))
+        }
+    } else {
+        s.ranges = initialRanges
+        if err := s.saveToCache(initialRanges); err != nil && s.log != nil {
+            s.log.Warn("failed to save IP ranges cache", zap.Error(err))
+        }
+    }
 
 	// update in background
 	go s.refreshLoop()
@@ -154,12 +261,18 @@ func (s *URLIPRange) refreshLoop() {
 		case <-ticker.C:
 			fullPrefixes, err := s.getPrefixes()
 			if err != nil {
-				break
+                if s.log != nil {
+                    s.log.Warn("failed to refresh IP ranges; keeping existing cache", zap.Error(err))
+                }
+                break
 			}
 
 			s.lock.Lock()
 			s.ranges = fullPrefixes
 			s.lock.Unlock()
+            if err := s.saveToCache(fullPrefixes); err != nil && s.log != nil {
+                s.log.Warn("failed to save IP ranges cache after refresh", zap.Error(err))
+            }
 		case <-s.ctx.Done():
 			ticker.Stop()
 			return
@@ -218,6 +331,11 @@ func (m *URLIPRange) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return fmt.Errorf("invalid retries value: %s", d.Val())
 			}
 			m.Retries = n
+        case "cache_file":
+            if !d.NextArg() {
+                return d.ArgErr()
+            }
+            m.CacheFile = d.Val()
 		case "url":
 			if !d.NextArg() {
 				return d.ArgErr()
