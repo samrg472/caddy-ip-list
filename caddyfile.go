@@ -67,55 +67,64 @@ func (s *URLIPRange) getContext() (context.Context, context.CancelFunc) {
 func (s *URLIPRange) fetch(api string) ([]netip.Prefix, error) {
 	var lastErr error
 	for attempt := 0; attempt <= s.Retries; attempt++ {
-		ctx, cancel := s.getContext()
-        // ensure we cancel each attempt's context
+        ctx, cancel := s.getContext()
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, api, nil)
-		if err != nil {
-			lastErr = err
+        req, err := http.NewRequestWithContext(ctx, http.MethodGet, api, nil)
+        if err != nil {
+            lastErr = err
             cancel()
             break
-		}
+        }
 
-		resp, err := http.DefaultClient.Do(req)
-        cancel()
-		if err != nil {
-			lastErr = err
-		} else {
-			if resp.StatusCode < 200 || resp.StatusCode > 299 {
-				resp.Body.Close()
-				lastErr = fmt.Errorf("fetch %s returned HTTP %d", api, resp.StatusCode)
-			} else {
-				scanner := bufio.NewScanner(resp.Body)
-				var prefixes []netip.Prefix
-				for scanner.Scan() {
-					line := scanner.Text()
+        resp, err := http.DefaultClient.Do(req)
+        if err != nil {
+            lastErr = err
+            cancel()
+        } else {
+            if resp.StatusCode < 200 || resp.StatusCode > 299 {
+                // drain and close body before next attempt
+                _ = resp.Body.Close()
+                lastErr = fmt.Errorf("fetch %s returned HTTP %d", api, resp.StatusCode)
+                cancel()
+            } else {
+                scanner := bufio.NewScanner(resp.Body)
+                var prefixes []netip.Prefix
+                for scanner.Scan() {
+                    line := scanner.Text()
 
-					// Remove comments from the line
-					if idx := strings.Index(line, "#"); idx != -1 {
-						line = line[:idx]
-					}
+                    // Remove comments from the line
+                    if idx := strings.Index(line, "#"); idx != -1 {
+                        line = line[:idx]
+                    }
 
-					// Trim spaces
-					line = strings.TrimSpace(line)
+                    // Trim spaces
+                    line = strings.TrimSpace(line)
 
-					// Skip empty lines
-					if line == "" {
-						continue
-					}
+                    // Skip empty lines
+                    if line == "" {
+                        continue
+                    }
 
-					// Convert to prefix
-					prefix, err := caddyhttp.CIDRExpressionToPrefix(line)
-					if err != nil {
-						resp.Body.Close()
-						return nil, err
-					}
-					prefixes = append(prefixes, prefix)
-				}
-				resp.Body.Close()
-				return prefixes, nil // Success
-			}
-		}
+                    // Convert to prefix
+                    prefix, err := caddyhttp.CIDRExpressionToPrefix(line)
+                    if err != nil {
+                        _ = resp.Body.Close()
+                        cancel()
+                        return nil, err
+                    }
+                    prefixes = append(prefixes, prefix)
+                }
+                // capture scanner error before closing body
+                scanErr := scanner.Err()
+                _ = resp.Body.Close()
+                cancel()
+                if scanErr != nil {
+                    lastErr = scanErr
+                } else {
+                    return prefixes, nil // Success
+                }
+            }
+        }
 
 		// If not last attempt, delay before retrying
 		if attempt < s.Retries {
