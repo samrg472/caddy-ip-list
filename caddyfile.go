@@ -31,10 +31,11 @@ type URLIPRange struct {
 	URLs []string `json:"url"`
 	// refresh Interval
 	Interval caddy.Duration `json:"interval,omitempty"`
-	// request Timeout
+    // request Timeout
 	Timeout caddy.Duration `json:"timeout,omitempty"`
-	// Number of retries for fetching the IP list. Default is 0 (no retries).
-	Retries int `json:"retries,omitempty"`
+    // Number of retries for fetching the IP list.
+    // Default is 2 when unspecified. Set explicitly to 0 to disable retries.
+    Retries *int `json:"retries,omitempty"`
 
     // Optional path to a cache file. If not set, a file under Caddy's data
     // directory will be used, derived from the URLs.
@@ -65,8 +66,15 @@ func (s *URLIPRange) getContext() (context.Context, context.CancelFunc) {
 }
 
 func (s *URLIPRange) fetch(api string) ([]netip.Prefix, error) {
+    retries := 2
+    if s.Retries != nil {
+        retries = *s.Retries
+        if retries < 0 {
+            retries = 0
+        }
+    }
 	var lastErr error
-	for attempt := 0; attempt <= s.Retries; attempt++ {
+    for attempt := 0; attempt <= retries; attempt++ {
         ctx, cancel := s.getContext()
 
         req, err := http.NewRequestWithContext(ctx, http.MethodGet, api, nil)
@@ -126,13 +134,13 @@ func (s *URLIPRange) fetch(api string) ([]netip.Prefix, error) {
             }
         }
 
-		// If not last attempt, delay before retrying
-		if attempt < s.Retries {
+        // If not last attempt, delay before retrying
+        if attempt < retries {
 			time.Sleep(1 * time.Second)
 		}
 	}
 	// After all attempts
-	return nil, fmt.Errorf("after %d retries: %w", s.Retries, lastErr)
+    return nil, fmt.Errorf("after %d retries: %w", retries, lastErr)
 }
 
 type cacheFileContents struct {
@@ -339,7 +347,7 @@ func (m *URLIPRange) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			if err != nil || n < 0 {
 				return fmt.Errorf("invalid retries value: %s", d.Val())
 			}
-			m.Retries = n
+            m.Retries = &n
         case "cache_file":
             if !d.NextArg() {
                 return d.ArgErr()

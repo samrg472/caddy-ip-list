@@ -65,7 +65,7 @@ trusted_proxies list {
 | url        | URL(s) to retrieve the IP list                   | string   | *required* |
 | interval   | Frequency at which the IP list is retrieved      | duration | 1h         |
 | timeout    | Maximum time to wait for a response from the URL | duration | no timeout |
-| retries    | Maximum number of retries per URL on startup     | int      | 0          |
+| retries    | Maximum number of retries per URL on startup     | int      | 2          |
 | cache_file | Optional path for persistent cache               | string   | auto       |
 
 ## URL Fetching, Caching, and Startup Behavior
